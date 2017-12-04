@@ -411,16 +411,19 @@ func (s *Server) ReloadTLSConnections(newTLSConfig *config.TLSConfig) error {
 		return err
 	}
 
+	// Keepint configuration in sync is important for other places that require
+	// access to config information, such as rpc.go, where we decide on what kind
+	// of network connections to accept depending on the server configuration
+	s.configLock.Lock()
+	s.config.TLSConfig = newTLSConfig
+	s.configLock.Unlock()
+
 	if s.rpcCancel == nil {
 		s.logger.Printf("[ERR] nomad: No TLS Context to reset")
 		return fmt.Errorf("Unable to reset tls context")
 	}
 
 	s.rpcCancel()
-
-	s.configLock.Lock()
-	s.config.TLSConfig = newTLSConfig
-	s.configLock.Unlock()
 
 	s.rpcTLSLock.Lock()
 	s.rpcTLS = incomingTLS
