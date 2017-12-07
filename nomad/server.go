@@ -85,8 +85,9 @@ const (
 // schedulers, and notification bus for agents.
 type Server struct {
 	config     *Config
-	configLock sync.RWMutex
-	logger     *log.Logger
+	configLock sync.Mutex
+
+	logger *log.Logger
 
 	// Connection pool to other Nomad servers
 	connPool *ConnPool
@@ -96,32 +97,28 @@ type Server struct {
 
 	// The raft instance is used among Nomad nodes within the
 	// region to protect operations that require strong consistency
-	leaderCh      <-chan bool
-	raft          *raft.Raft
-	raftLayer     *RaftLayer
-	raftLayerLock sync.Mutex
+	leaderCh  <-chan bool
+	raft      *raft.Raft
+	raftLayer *RaftLayer
 
 	raftStore *raftboltdb.BoltStore
 	raftInmem *raft.InmemStore
 
-	raftTransport     *raft.NetworkTransport
-	raftTransportLock sync.Mutex
+	raftTransport *raft.NetworkTransport
 
 	// fsm is the state machine used with Raft
 	fsm *nomadFSM
 
 	// rpcListener is used to listen for incoming connections
-	rpcListener     net.Listener
-	rpcListenerLock sync.Mutex
-	listenerCh      chan struct{}
+	rpcListener net.Listener
+	listenerCh  chan struct{}
 
 	rpcServer    *rpc.Server
 	rpcAdvertise net.Addr
 
 	// rpcTLS is the TLS config for incoming TLS requests
-	rpcTLS     *tls.Config
-	rpcCancel  context.CancelFunc
-	rpcTLSLock sync.Mutex
+	rpcTLS    *tls.Config
+	rpcCancel context.CancelFunc
 
 	// peers is used to track the known Nomad servers. This is
 	// used for region forwarding and clustering.
@@ -355,8 +352,6 @@ func NewServer(config *Config, consulCatalog consul.CatalogAPI, logger *log.Logg
 
 // Start the RPC listeners
 func (s *Server) startRPCListener() {
-	s.rpcListenerLock.Lock()
-	defer s.rpcListenerLock.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.rpcCancel = cancel
 	go func() {
@@ -366,9 +361,6 @@ func (s *Server) startRPCListener() {
 }
 
 func (s *Server) createRPCListener() error {
-	s.rpcListenerLock.Lock()
-	defer s.rpcListenerLock.Unlock()
-
 	s.listenerCh = make(chan struct{})
 	list, err := net.ListenTCP("tcp", s.config.RPCAddr)
 	if err != nil || list == nil {
@@ -425,21 +417,15 @@ func (s *Server) reloadTLSConnections(newTLSConfig *config.TLSConfig) error {
 
 	s.rpcCancel()
 
-	s.rpcTLSLock.Lock()
 	s.rpcTLS = incomingTLS
-	s.rpcTLSLock.Unlock()
 
-	s.raftTransportLock.Lock()
-	defer s.raftTransportLock.Unlock()
 	s.raftTransport.Close()
 
 	s.connPool.ReloadTLS(tlsWrap)
 
 	// reinitialize our rpc listener
-	s.rpcListenerLock.Lock()
 	s.rpcListener.Close()
 	<-s.listenerCh
-	s.rpcListenerLock.Unlock()
 
 	err = s.createRPCListener()
 	if err != nil {
@@ -447,11 +433,9 @@ func (s *Server) reloadTLSConnections(newTLSConfig *config.TLSConfig) error {
 	}
 	s.startRPCListener()
 
-	s.raftLayerLock.Lock()
 	s.raftLayer.Close()
 	wrapper := tlsutil.RegionSpecificWrapper(s.config.Region, tlsWrap)
 	s.raftLayer = NewRaftLayer(s.rpcAdvertise, wrapper)
-	s.raftLayerLock.Unlock()
 
 	// re-initialize the network transport with a re-initialized stream layer
 	trans := raft.NewNetworkTransport(s.raftLayer, 3, s.config.RaftTimeout,
