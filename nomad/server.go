@@ -396,6 +396,8 @@ func getTLSConf(enableRPC bool, tlsConf *tlsutil.Config) (*tls.Config, tlsutil.R
 func (s *Server) reloadTLSConnections(newTLSConfig *config.TLSConfig) error {
 	s.logger.Printf("[INFO] nomad: reloading server connections due to configuration changes")
 
+	// the server config must be in sync with the latest config changes, due to
+	// testing for TLS configuration settings in rpc.go
 	tlsConf := s.config.newTLSConfig(newTLSConfig)
 	incomingTLS, tlsWrap, err := getTLSConf(newTLSConfig.EnableRPC, tlsConf)
 	if err != nil {
