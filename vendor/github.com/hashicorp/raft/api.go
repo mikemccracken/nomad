@@ -786,6 +786,10 @@ func (r *Raft) DemoteVoter(id ServerID, prevIndex uint64, timeout time.Duration)
 	}, timeout)
 }
 
+func (r *Raft) Reload(trans Transport) {
+	r.trans = trans
+}
+
 // Shutdown is used to stop the Raft background routines.
 // This is not a graceful operation. Provides a future that
 // can be used to block until all background routines have exited.
