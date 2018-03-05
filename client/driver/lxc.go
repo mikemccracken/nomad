@@ -351,8 +351,8 @@ func (d *LxcDriver) startWithCleanup(ctx *ExecContext, task *structs.Task) (*Sta
 	}
 	c.SetLogLevel(logLevel)
 
-	logFile := filepath.Join(ctx.TaskDir.Dir, fmt.Sprintf("%v-lxc.log", task.Name))
-	c.SetLogFile(logFile)
+	// MMCC TEMP DEBUG logFile := filepath.Join(ctx.TaskDir.Dir, fmt.Sprintf("%v-lxc.log", task.Name))
+	c.SetLogFile(filepath.Join("tmp", "nomad-lxc-debug.log")) //(logFile)
 
 	if commonConfig.UseExecute {
 		d.logger.Printf("[INFO] Using lxc-execute to start application container")
@@ -442,6 +442,9 @@ func (d *LxcDriver) executeContainer(ctx *ExecContext, c *lxc.Container, task *s
 	}
 
 	baseLvName := executeConfig.BaseRootFsPath[4:]
+
+	d.logger.Printf("[DEBUG] creating lv: lvcreate -kn -n %s -s %s", c.Name(), baseLvName)
+
 	lvCreateCmd := exec.Command("lvcreate", "-kn", "-n", c.Name(), "-s", baseLvName)
 	if err := lvCreateCmd.Run(); err != nil {
 		return nil, fmt.Errorf("could not create thin pool snapshot with cmd '%v': %v: %s", lvCreateCmd.Args, err, err.(*exec.ExitError).Stderr), noCleanup
@@ -620,6 +623,7 @@ func (d *LxcDriver) setCommonContainerConfig(ctx *ExecContext, c *lxc.Container,
 		}
 	}
 
+	d.logger.Printf("[DEBUG] setting environment: %v", ctx.TaskEnv.List())
 	for _, envVar := range ctx.TaskEnv.List() {
 		if err := c.SetConfigItem("lxc.environment", envVar); err != nil {
 			return fmt.Errorf("error setting environment variable '%s': %v", envVar, err)
@@ -641,7 +645,7 @@ func setLimitsOnContainer(c *lxc.Container, task *structs.Task) error {
 }
 
 func (d *LxcDriver) Cleanup(ctx *ExecContext, resources *CreatedResources) error {
-
+	d.logger.Printf("[DEBUG] doing nothing in Cleanup...") // MMCC cleanup only called for Kill?
 	return nil
 }
 
@@ -737,27 +741,41 @@ func (h *lxcDriverHandle) Exec(ctx context.Context, cmd string, args []string) (
 }
 
 func (h *lxcDriverHandle) Kill() error {
+	defer close(h.doneCh)
 	name := h.container.Name()
 
+	if !h.container.Running() {
+		h.logger.Printf("[INFO] driver.lxc: container %s already stopped in Kill()")
+		return nil
+	}
+
 	h.logger.Printf("[INFO] driver.lxc: shutting down container %q", name)
+	if err := h.container.Shutdown(h.killTimeout); err != nil {
+		h.logger.Printf("[INFO] driver.lxc: shutting down container %q failed: %v", name, err)
 
-	if h.container.Running() {
-		if err := h.container.Shutdown(h.killTimeout); err != nil {
-			h.logger.Printf("[INFO] driver.lxc: shutting down container %q failed: %v", name, err)
-
-			if err := h.container.Stop(); err != nil {
-				h.logger.Printf("[WARN] driver.lxc: error stopping container %q: %v", name, err)
-				return fmt.Errorf("could not stop container: %v", err)
-			}
+		if err := h.container.Stop(); err != nil {
+			h.logger.Printf("[WARN] driver.lxc: error stopping container %q: %v", name, err)
+			return fmt.Errorf("could not stop container: %v", err)
 		}
 	}
 
-	if err := h.container.Destroy(); err != nil {
-		h.logger.Printf("[WARN] driver.lxc: error destroying container %q: %v.", name, err)
-		return fmt.Errorf("could not destroy container")
+	return nil
+}
+
+func (h *lxcDriverHandle) cleanupContainer() error {
+	h.logger.Printf("[DEBUG] waiting for container %s to stop", h.container.Name())
+	if stopped := h.container.Wait(lxc.STOPPED, time.Duration(15)*time.Second); stopped != true {
+		h.logger.Printf("[WARN] driver.lxc: timeout waiting for container to stop. will attempt destroy anyway.")
 	}
 
-	close(h.doneCh)
+	h.logger.Printf("[DEBUG] destroying container %s", h.container.Name())
+
+	if err := h.container.Destroy(); err != nil {
+		h.logger.Printf("[WARN] driver.lxc: error destroying container %q: %v.", h.container.Name(), err)
+		return fmt.Errorf("could not destroy container")
+	}
+	h.logger.Printf("[DEBUG] NOT removing lv %s", h.container.Name())
+	// TODO MMCC -- need to remove the lv here? looks like destroy does it?
 	return nil
 }
 
@@ -854,22 +872,29 @@ func (h *lxcDriverHandle) Stats() (*cstructs.TaskResourceUsage, error) {
 }
 
 func (h *lxcDriverHandle) run() {
-	defer close(h.waitCh)
+	defer func() {
+		h.logger.Printf("[DEBUG] calling cleanupContainer after run() finishes.")
+		h.cleanupContainer()
+		close(h.waitCh)
+	}()
 	timer := time.NewTimer(containerMonitorIntv)
 	for {
 		select {
 		case <-timer.C:
 			process, err := os.FindProcess(h.initPid)
 			if err != nil {
+				h.logger.Printf("[DEBUG] - process not found. ending run()")
 				h.waitCh <- &dstructs.WaitResult{Err: err}
 				return
 			}
 			if err := process.Signal(syscall.Signal(0)); err != nil {
+				h.logger.Printf("[DEBUG] - process not found via signal. ending run()")
 				h.waitCh <- &dstructs.WaitResult{}
 				return
 			}
 			timer.Reset(containerMonitorIntv)
 		case <-h.doneCh:
+			h.logger.Printf("[DEBUG] - process sent doneCh (because of kill?)")
 			h.waitCh <- &dstructs.WaitResult{}
 			return
 		}
